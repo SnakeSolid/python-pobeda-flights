@@ -14,7 +14,6 @@ import datetime
 import json
 import logging
 import random
-import signal
 import sqlite3
 import sys
 import time
@@ -22,19 +21,6 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import requests
-
-
-class GracefulKiller:
-    """Signal handler for graceful shutdown."""
-
-    def __init__(self):
-        self.kill_now = False
-        signal.signal(signal.SIGINT, self.exit_gracefully)
-        signal.signal(signal.SIGTERM, self.exit_gracefully)
-
-    def exit_gracefully(self, signum, frame):
-        self.kill_now = True
-        logging.info("Shutdown signal received, stopping after current request...")
 
 
 def parse_arguments():
@@ -432,10 +418,9 @@ def process_date(
     return ProcessResult.SAVED if saved_any else ProcessResult.FAILED
 
 
-def run_parsing_cycle(args, killer: GracefulKiller) -> bool:
+def run_parsing_cycle(args) -> None:
     """
     Execute one full pass through all dates (from start_date to end_date).
-    Returns False if a shutdown signal was received during execution.
     """
     session = requests.Session()
     try:
@@ -449,10 +434,6 @@ def run_parsing_cycle(args, killer: GracefulKiller) -> bool:
     query_date_obj = datetime.date.today()
 
     for idx, date_str in enumerate(dates):
-        if killer.kill_now:
-            logging.info("Interrupted by signal")
-            return False
-
         result = process_date(
             session,
             args.db,
@@ -470,8 +451,6 @@ def run_parsing_cycle(args, killer: GracefulKiller) -> bool:
             delay = random.uniform(args.delay_min, args.delay_max)
             logging.info(f"Waiting {delay:.1f} seconds...")
             time.sleep(delay)
-
-    return True
 
 
 def main():
@@ -493,29 +472,26 @@ def main():
         dump_database(args.db)
         return
 
-    killer = GracefulKiller()
-
     if args.continuous:
         logging.info("Starting in continuous mode (infinite loop)")
-        while not killer.kill_now:
-            logging.info("Starting a new data collection cycle")
-            success = run_parsing_cycle(args, killer)
-            if not success:
-                break
-            if not killer.kill_now:
+        try:
+            while True:
+                logging.info("Starting a new data collection cycle")
+                run_parsing_cycle(args)
                 logging.info(
                     "Cycle complete. Waiting 24 hours until next collection..."
                 )
-                # Wait 24 hours with interrupt capability
-                for _ in range(24 * 60):  # check every minute
-                    if killer.kill_now:
-                        break
-                    time.sleep(60)
-        logging.info("Continuous mode stopped")
+                time.sleep(24 * 60 * 60)
+        except KeyboardInterrupt:
+            logging.info("Continuous mode stopped by user")
     else:
         logging.info("Starting in single-run mode")
-        run_parsing_cycle(args, killer)
-        logging.info("Work finished")
+        try:
+            run_parsing_cycle(args)
+        except KeyboardInterrupt:
+            logging.info("Interrupted by user")
+        else:
+            logging.info("Work finished")
 
 
 if __name__ == "__main__":

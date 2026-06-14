@@ -1,0 +1,9 @@
+syntax: glob
+*.egg-info/
+*.pt/
+.venv/
+.zed/
+__pycache__/
+cookies.txt
+node_modules/
+storage/

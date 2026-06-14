@@ -112,8 +112,6 @@ def init_db(db_path: str):
             UNIQUE(query_date, flight_date, origin, destination)
         )
     """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_query_date ON prices(query_date)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_flight_date ON prices(flight_date)")
     conn.commit()
     conn.close()
 

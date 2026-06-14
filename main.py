@@ -18,6 +18,7 @@ import signal
 import sqlite3
 import sys
 import time
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -336,21 +337,32 @@ def date_range(start_str: str, end_str: str):
         current += datetime.timedelta(days=1)
 
 
+class ProcessResult(Enum):
+    """Result of processing a single flight date."""
+
+    SAVED = "saved"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
 def process_date(
     session: requests.Session,
     db_path: str,
     date_str: str,
     origin: str,
     destination: str,
-    delay_min: float,
-    delay_max: float,
     query_date_obj: datetime.date,
     idx: int,
     total: int,
-) -> bool:
+) -> ProcessResult:
     """
     Process a single date: check for an existing record, make a request if needed,
-    save the result. Returns True if new data was saved.
+    save the result.
+
+    Returns:
+        ProcessResult.SAVED   — new data was saved (API request was made)
+        ProcessResult.FAILED  — API request was made but failed or returned no data
+        ProcessResult.SKIPPED — skipped because a record already exists (no API request was made)
     """
     flight_date_formatted = convert_date_format(date_str)
     query_date_str = query_date_obj.strftime("%Y.%m.%d")
@@ -362,26 +374,26 @@ def process_date(
         logging.info(
             f"Flight date {date_str}: record already exists for {query_date_str}, skipping request"
         )
-        return False
+        return ProcessResult.SKIPPED
 
     logging.info(f"Processing date {date_str} ({idx}/{total}) – requesting API")
 
     data = fetch_flights_for_date(session, date_str, origin, destination)
     if data is None:
         logging.warning(f"Date {date_str} skipped due to error")
-        return False
+        return ProcessResult.FAILED
 
     if data.get("result") != "ok":
         logging.warning(
             f"API returned result != ok for date {date_str}: {data.get('result')}"
         )
-        return False
+        return ProcessResult.FAILED
 
     direct_flights = extract_direct_flights(data)
     prices = data.get("prices")
     if not prices:
         logging.warning(f"No price data for date {date_str}")
-        return False
+        return ProcessResult.FAILED
 
     saved_any = False
     for flight in direct_flights:
@@ -417,7 +429,7 @@ def process_date(
     if not saved_any:
         logging.info(f"No direct flights with prices found for date {date_str}")
 
-    return saved_any
+    return ProcessResult.SAVED if saved_any else ProcessResult.FAILED
 
 
 def run_parsing_cycle(args, killer: GracefulKiller) -> bool:
@@ -441,21 +453,20 @@ def run_parsing_cycle(args, killer: GracefulKiller) -> bool:
             logging.info("Interrupted by signal")
             return False
 
-        process_date(
+        result = process_date(
             session,
             args.db,
             date_str,
             args.origin,
             args.destination,
-            args.delay_min,
-            args.delay_max,
             query_date_obj,
             idx + 1,
             total,
         )
 
-        # Delay before the next request (except for the last one)
-        if idx < total - 1:
+        # Delay before the next request (except for the last one),
+        # only if an actual API request was made
+        if result is not ProcessResult.SKIPPED and idx < total - 1:
             delay = random.uniform(args.delay_min, args.delay_max)
             logging.info(f"Waiting {delay:.1f} seconds...")
             time.sleep(delay)

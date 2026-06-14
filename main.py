@@ -453,6 +453,15 @@ def run_parsing_cycle(args) -> None:
             time.sleep(delay)
 
 
+def seconds_until_noon() -> float:
+    """Return the number of seconds from now until the next 12:00 (noon)."""
+    now = datetime.datetime.now()
+    next_noon = (now + datetime.timedelta(days=1)).replace(
+        hour=12, minute=0, second=0, microsecond=0
+    )
+    return (next_noon - now).total_seconds()
+
+
 def main():
     args = parse_arguments()
 
@@ -478,10 +487,11 @@ def main():
             while True:
                 logging.info("Starting a new data collection cycle")
                 run_parsing_cycle(args)
+                sleep_seconds = seconds_until_noon()
                 logging.info(
-                    "Cycle complete. Waiting 24 hours until next collection..."
+                    f"Cycle complete. Next collection in {sleep_seconds:.0f} seconds."
                 )
-                time.sleep(24 * 60 * 60)
+                time.sleep(sleep_seconds)
         except KeyboardInterrupt:
             logging.info("Continuous mode stopped by user")
     else:

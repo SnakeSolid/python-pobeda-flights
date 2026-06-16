@@ -6,7 +6,8 @@ with results saved to SQLite.
 Performs sequential requests for each date in the given range.
 Between requests – random delay from 30 to 60 seconds.
 Data is saved to an SQLite database with deduplication by the current date.
-A continuous mode is supported for daily data collection.
+A continuous mode is supported for periodic data collection every 8 hours.
+Use --force to refresh data even if a recent record already exists.
 """
 
 import argparse
@@ -78,7 +79,12 @@ def parse_arguments():
     parser.add_argument(
         "--continuous",
         action="store_true",
-        help="Infinite mode: after processing all dates, wait 24 hours and repeat",
+        help="Infinite mode: after processing all dates, wait 8 hours and repeat",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force API requests even if a recent record already exists in the database",
     )
     return parser.parse_args()
 
@@ -103,27 +109,6 @@ def init_db(db_path: str):
     conn.close()
 
 
-def record_exists(
-    db_path: str, query_date: str, flight_date: str, origin: str, destination: str
-) -> bool:
-    """
-    Check if a record already exists today for the given flight.
-    """
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT 1 FROM prices
-        WHERE query_date = ? AND flight_date = ? AND origin = ? AND destination = ?
-        LIMIT 1
-    """,
-        (query_date, flight_date, origin, destination),
-    )
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
-
-
 def save_price(
     db_path: str,
     query_date: str,
@@ -138,7 +123,7 @@ def save_price(
     try:
         cursor.execute(
             """
-            INSERT OR IGNORE INTO prices (query_date, flight_date, min_price, origin, destination)
+            INSERT OR REPLACE INTO prices (query_date, flight_date, min_price, origin, destination)
             VALUES (?, ?, ?, ?, ?)
         """,
             (query_date, flight_date, min_price, origin, destination),
@@ -148,6 +133,37 @@ def save_price(
         logging.error(f"Error saving to database: {e}")
     finally:
         conn.close()
+
+
+def record_exists(
+    db_path: str,
+    query_date: str,
+    flight_date: str,
+    origin: str,
+    destination: str,
+    max_age_hours: float = 8,
+) -> bool:
+    """
+    Check if a record already exists that was created within the last max_age_hours.
+    Returns True if a fresh record exists, False otherwise.
+    """
+    cutoff = (
+        datetime.datetime.now() - datetime.timedelta(hours=max_age_hours)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT 1 FROM prices
+        WHERE query_date = ? AND flight_date = ? AND origin = ? AND destination = ?
+        AND created_at > ?
+        LIMIT 1
+    """,
+        (query_date, flight_date, origin, destination, cutoff),
+    )
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
 
 
 def dump_database(db_path: str):
@@ -185,18 +201,17 @@ def generate_unique_tab_id() -> str:
     return timestamp + random_part
 
 
-def get_referer_url(date_str: str, origin: str, destination: str) -> str:
-    """Build the Referer URL for the given date, origin, and destination."""
-    return (
-        f"https://ticket.flypobeda.ru/websky/"
-        f"?origin-city-code[0]={origin}&destination-city-code[0]={destination}&date[0]={date_str}"
-        f"&segmentsCount=1&adultsCount=1&youngAdultsCount=0&childrenCount=0"
-        f"&infantsWithSeatCount=0&infantsWithoutSeatCount=0&lang=ru"
-    )
+def get_referer_url() -> str:
+    """Build the Referer URL for the API request (mirrors the working curl)."""
+    return "https://ticket.flypobeda.ru/websky/"
 
 
 def fetch_flights_for_date(
-    session: requests.Session, date_str: str, origin: str, destination: str
+    session: requests.Session,
+    date_str: str,
+    origin: str,
+    destination: str,
+    unique_tab_id: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Send a request to the API for the specified date and return the JSON response.
@@ -209,8 +224,9 @@ def fetch_flights_for_date(
         "Accept-Encoding": "gzip, deflate, br, zstd",
         "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
         "Origin": "https://ticket.flypobeda.ru",
-        "Referer": get_referer_url(date_str, origin, destination),
-        "Unique-Tab-Id": generate_unique_tab_id(),
+        "Referer": get_referer_url(),
+        "Unique-Tab-Id": unique_tab_id,
+        "Connection": "keep-alive",
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",
@@ -224,6 +240,7 @@ def fetch_flights_for_date(
         "date[0]": date_str,
         "origin-city-code[0]": origin,
         "destination-city-code[0]": destination,
+        "destination-port-code[0]": destination,
         "adultsCount": 1,
         "youngAdultsCount": 0,
         "childrenCount": 0,
@@ -260,7 +277,7 @@ def extract_direct_flights(data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def get_min_price_for_chain(
-    prices_obj: Dict[str, Any], chain_id: str
+    prices_obj: List[Dict[str, Any]], chain_id: str
 ) -> Optional[float]:
     """
     For the given chain_id, find the minimum price among all available fares.
@@ -340,6 +357,8 @@ def process_date(
     query_date_obj: datetime.date,
     idx: int,
     total: int,
+    unique_tab_id: str,
+    force: bool = False,
 ) -> ProcessResult:
     """
     Process a single date: check for an existing record, make a request if needed,
@@ -348,23 +367,21 @@ def process_date(
     Returns:
         ProcessResult.SAVED   — new data was saved (API request was made)
         ProcessResult.FAILED  — API request was made but failed or returned no data
-        ProcessResult.SKIPPED — skipped because a record already exists (no API request was made)
+        ProcessResult.SKIPPED — skipped because a fresh record already exists (no API request was made)
     """
     flight_date_formatted = convert_date_format(date_str)
     query_date_str = query_date_obj.strftime("%Y.%m.%d")
 
-    # Check if a record already exists today
-    if record_exists(
+    # Skip request if a fresh record already exists and force is not set
+    if not force and record_exists(
         db_path, query_date_str, flight_date_formatted, origin, destination
     ):
-        logging.info(
-            f"Flight date {date_str}: record already exists for {query_date_str}, skipping request"
-        )
+        logging.info(f"Flight date {date_str}: fresh record exists, skipping request")
         return ProcessResult.SKIPPED
 
     logging.info(f"Processing date {date_str} ({idx}/{total}) – requesting API")
 
-    data = fetch_flights_for_date(session, date_str, origin, destination)
+    data = fetch_flights_for_date(session, date_str, origin, destination, unique_tab_id)
     if data is None:
         logging.warning(f"Date {date_str} skipped due to error")
         return ProcessResult.FAILED
@@ -398,6 +415,14 @@ def process_date(
         if min_price is None:
             continue
 
+        # Treat prices <= 1 as API error response and skip them
+        if min_price <= 1:
+            logging.warning(
+                f"Suspicious price {min_price:.2f} for chain {chain_id} "
+                f"on {depart_date} – treating as error and ignoring"
+            )
+            continue
+
         flight_date_formatted = convert_date_format(depart_date)
         save_price(
             db_path,
@@ -423,6 +448,7 @@ def run_parsing_cycle(args) -> None:
     Execute one full pass through all dates (from start_date to end_date).
     """
     session = requests.Session()
+    unique_tab_id = generate_unique_tab_id()
     try:
         session.get("https://ticket.flypobeda.ru/websky/", timeout=30)
         logging.info("Session initialized")
@@ -443,6 +469,8 @@ def run_parsing_cycle(args) -> None:
             query_date_obj,
             idx + 1,
             total,
+            unique_tab_id,
+            force=args.force,
         )
 
         # Delay before the next request (except for the last one),
@@ -453,13 +481,12 @@ def run_parsing_cycle(args) -> None:
             time.sleep(delay)
 
 
-def seconds_until_noon() -> float:
-    """Return the number of seconds from now until the next 12:00 (noon)."""
-    now = datetime.datetime.now()
-    next_noon = (now + datetime.timedelta(days=1)).replace(
-        hour=12, minute=0, second=0, microsecond=0
-    )
-    return (next_noon - now).total_seconds()
+CYCLE_INTERVAL_HOURS = 8
+
+
+def seconds_until_next_cycle() -> float:
+    """Return the number of seconds until the next data collection cycle (8 hours)."""
+    return CYCLE_INTERVAL_HOURS * 3600
 
 
 def main():
@@ -482,14 +509,19 @@ def main():
         return
 
     if args.continuous:
-        logging.info("Starting in continuous mode (infinite loop)")
+        logging.info(
+            "Starting in continuous mode "
+            f"(next cycle every {CYCLE_INTERVAL_HOURS} hours)"
+        )
         try:
             while True:
                 logging.info("Starting a new data collection cycle")
                 run_parsing_cycle(args)
-                sleep_seconds = seconds_until_noon()
+                sleep_seconds = seconds_until_next_cycle()
                 logging.info(
-                    f"Cycle complete. Next collection in {sleep_seconds:.0f} seconds."
+                    f"Cycle complete. "
+                    f"Next collection in {sleep_seconds:.0f} seconds "
+                    f"({sleep_seconds / 3600:.1f} hours)."
                 )
                 time.sleep(sleep_seconds)
         except KeyboardInterrupt:

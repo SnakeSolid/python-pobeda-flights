@@ -141,25 +141,20 @@ def record_exists(
     flight_date: str,
     origin: str,
     destination: str,
-    max_age_hours: float = 8,
 ) -> bool:
     """
     Check if a record already exists that was created within the last max_age_hours.
     Returns True if a fresh record exists, False otherwise.
     """
-    cutoff = (
-        datetime.datetime.now() - datetime.timedelta(hours=max_age_hours)
-    ).strftime("%Y-%m-%d %H:%M:%S")
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute(
         """
         SELECT 1 FROM prices
         WHERE query_date = ? AND flight_date = ? AND origin = ? AND destination = ?
-        AND created_at > ?
         LIMIT 1
     """,
-        (query_date, flight_date, origin, destination, cutoff),
+        (query_date, flight_date, origin, destination),
     )
     exists = cursor.fetchone() is not None
     conn.close()

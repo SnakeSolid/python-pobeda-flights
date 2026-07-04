@@ -4,7 +4,7 @@ A Python script for collecting data on direct flights of the airline Pobeda with
 
 ## Description
 
-This tool performs sequential HTTP requests to the Pobeda ticket API for each date in a given range. Between requests, a random delay is applied to avoid excessive load. Data is saved to an SQLite database with deduplication by the current query date. The tool supports both single-run and continuous (daily) collection modes.
+This tool performs sequential HTTP requests to the Pobeda ticket API for each date in a given range. Between requests, a random delay is applied to avoid excessive load. Data is saved to an SQLite database with deduplication by the current query date. The tool supports both single-run and continuous (every 8 hours) collection modes. Use `--force` to re-fetch data even if a recent record already exists.
 
 By default, the script collects prices for direct flights from Vladikavkaz (OGZ) to Saint Petersburg (LED).
 
@@ -39,7 +39,7 @@ uv run main.py --start-date 01.08.2026 --end-date 15.08.2026 --origin OGZ --dest
 
 ### Continuous mode
 
-Run in infinite loop mode. After processing all dates in the range, the script waits 24 hours and repeats the cycle:
+Run in infinite loop mode. After processing all dates in the range, the script waits 8 hours and repeats the cycle:
 
 ```
 uv run main.py --continuous
@@ -74,7 +74,8 @@ The output format is semicolon-separated with the following columns:
 | `--delay-max` | Maximum delay between requests in seconds | `60` |
 | `--db` | Path to SQLite database file | `flights.db` |
 | `--dump` | Dump all data from database to CSV and exit | `false` |
-| `--continuous` | Enable infinite daily collection mode | `false` |
+| `--continuous` | Enable infinite collection mode (repeats every 8 hours) | `false` |
+| `--force` | Force API requests even if a recent record already exists | `false` |
 
 ## Database
 
